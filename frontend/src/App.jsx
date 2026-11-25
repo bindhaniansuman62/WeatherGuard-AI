@@ -163,11 +163,17 @@ export default function App() {
 
   useEffect(() => {
     const unsubscribe = subscribeToAuthLifecycle({
-      onAuthState: ({ authLoading: loading, session: nextSession }) => {
+      onAuthState: ({ authLoading: loading, session: nextSession, fromRedirect }) => {
         setAuthLoading(loading);
         if (!loading) {
           setAvatarFailed(false);
           setSession(nextSession);
+          if (fromRedirect && nextSession) {
+            setRoute('dashboard');
+            if (window.location.hash !== '#/dashboard') {
+              window.location.hash = '#/dashboard';
+            }
+          }
         }
       },
       onRedirectError: (errMsg) => {

@@ -17,9 +17,28 @@ function normalizeEnvValue(val) {
   return val.trim().replace(/^['"]|['"]$/g, '').trim();
 }
 
+const rawAuthDomain = normalizeEnvValue(import.meta.env.VITE_FIREBASE_AUTH_DOMAIN);
+const useAuthProxyEnv = normalizeEnvValue(import.meta.env.VITE_FIREBASE_USE_AUTH_PROXY);
+
+function resolveEffectiveAuthDomain() {
+  if (typeof window === 'undefined') return rawAuthDomain;
+  const host = window.location.hostname;
+  const isLocalHost =
+    host === 'localhost' || host === '127.0.0.1' || host === '[::1]';
+  // On external production hosts (e.g. Vercel with /__/auth/* rewrite), using the
+  // app host as authDomain avoids Chrome third-party cookie/storage partitioning.
+  const proxyEnabled = useAuthProxyEnv !== 'false';
+  if (!isLocalHost && proxyEnabled && rawAuthDomain) {
+    return window.location.host;
+  }
+  return rawAuthDomain;
+}
+
+const effectiveAuthDomain = resolveEffectiveAuthDomain();
+
 const firebaseConfig = {
   apiKey: normalizeEnvValue(import.meta.env.VITE_FIREBASE_API_KEY),
-  authDomain: normalizeEnvValue(import.meta.env.VITE_FIREBASE_AUTH_DOMAIN),
+  authDomain: effectiveAuthDomain,
   projectId: normalizeEnvValue(import.meta.env.VITE_FIREBASE_PROJECT_ID),
   storageBucket: normalizeEnvValue(import.meta.env.VITE_FIREBASE_STORAGE_BUCKET),
   messagingSenderId: normalizeEnvValue(import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID),
@@ -40,12 +59,13 @@ export const hasRequiredEnvVars =
 
 export const isSameOriginAuthDomain =
   typeof window !== 'undefined' &&
-  Boolean(firebaseConfig.authDomain) &&
-  firebaseConfig.authDomain === window.location.host;
+  Boolean(effectiveAuthDomain) &&
+  effectiveAuthDomain === window.location.host;
 
 let firebaseAuth = null;
 let firebaseInitError = '';
 let persistenceReadyPromise = Promise.resolve();
+let resolverReadyPromise = Promise.resolve();
 
 if (hasRequiredEnvVars) {
   try {
@@ -70,12 +90,14 @@ if (hasRequiredEnvVars) {
       ).catch(() => setPersistence(firebaseAuth, browserSessionPersistence).catch(() => {}));
     }
 
-    // Proactively pre-load __/auth/iframe on desktop Chrome so signInWithPopup
-    // keeps Chrome's synchronous click user-activation context intact.
+    // Proactively pre-load __/auth/iframe before Sign-In mounts (capped at 2.5s so
+    // offline environments never stall authLoading) to keep desktop Chrome click gesture intact.
     if (typeof window !== 'undefined' && firebaseAuth?._popupRedirectResolver?._initialize) {
-      Promise.resolve()
+      const initPromise = Promise.resolve()
         .then(() => firebaseAuth._popupRedirectResolver._initialize(firebaseAuth))
         .catch(() => {});
+      const capPromise = new Promise((resolve) => setTimeout(resolve, 2500));
+      resolverReadyPromise = Promise.race([initPromise, capPromise]);
     }
   } catch (err) {
     firebaseInitError = err?.message || 'Failed to initialize Firebase app.';
@@ -86,9 +108,11 @@ if (hasRequiredEnvVars) {
 export const isFirebaseConfigured = hasRequiredEnvVars && Boolean(firebaseAuth);
 export {
   browserPopupRedirectResolver,
+  effectiveAuthDomain,
   firebaseAuth,
   firebaseInitError,
   persistenceReadyPromise,
+  resolverReadyPromise,
 };
 
 export function getConfiguredProviders() {

@@ -93,6 +93,18 @@ Edit `frontend/.env` as needed:
 - **Public Demonstration Access (Default)**: When `WEATHERGUARD_REQUIRE_AUTH` is unset or `false`, dashboard endpoints operate cleanly for guest/demo sessions and report `access_mode: "public_demo"` on `/api/auth/status`.
 - **Strict Authenticated Access**: Set `WEATHERGUARD_REQUIRE_AUTH=true` alongside `FIREBASE_PROJECT_ID` and service account credentials (`FIREBASE_CREDENTIALS_PATH` / `GOOGLE_APPLICATION_CREDENTIALS`) with `firebase-admin` installed. Strict mode rejects unsigned or cryptographically unverified tokens.
 
+### 4. Production OAuth & Vercel Deployment Configuration
+
+Because modern Chrome blocks cross-origin third-party storage between `*.vercel.app` and `*.firebaseapp.com`, WeatherGuard AI uses a same-origin auth reverse proxy on Vercel ([frontend/vercel.json](frontend/vercel.json)):
+
+1. **Vercel Reverse Proxy & Headers**: [frontend/vercel.json](frontend/vercel.json) rewrites `/__/auth/(.*)` to `https://weatherguard-ai.firebaseapp.com/__/auth/$1` and sets `Cross-Origin-Opener-Policy: same-origin-allow-popups`.
+2. **Firebase Console -> Authentication -> Settings -> Authorized domains**: Ensure `weather-guard-ai-beige.vercel.app` (and any custom domain) is added.
+3. **Google Cloud Console -> APIs & Services -> Credentials -> OAuth 2.0 Client ID -> Authorized redirect URIs**:
+   - Keep `https://weatherguard-ai.firebaseapp.com/__/auth/handler` (for `localhost` dev)
+   - Add `https://weather-guard-ai-beige.vercel.app/__/auth/handler` (for production same-origin popup & redirect OAuth)
+   - *(If using GitHub or Microsoft OAuth in production, also add `https://weather-guard-ai-beige.vercel.app/__/auth/handler` to those provider callback URLs.)*
+4. **Optional Env Override**: Same-origin proxy mode is active automatically on non-localhost origins. Set `VITE_FIREBASE_USE_AUTH_PROXY=false` only if you intentionally want cross-origin `VITE_FIREBASE_AUTH_DOMAIN`.
+
 ---
 
 ## Startup Commands

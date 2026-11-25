@@ -8,6 +8,7 @@ import {
 } from 'firebase/auth';
 import {
   browserPopupRedirectResolver,
+  effectiveAuthDomain,
   firebaseAuth,
   firebaseInitError,
   getConfiguredProviders,
@@ -18,6 +19,7 @@ import {
   isSameOriginAuthDomain,
   microsoftProvider,
   persistenceReadyPromise,
+  resolverReadyPromise,
 } from './firebase';
 
 const GUEST_SESSION_FLAG = 'wg_guest_session';
@@ -116,35 +118,38 @@ export function getAuthStatus() {
     isFirebaseConfigured,
     enabledProviders,
     unconfiguredReason,
+    authDomain: effectiveAuthDomain,
+    isSameOriginAuthDomain,
   };
 }
 
 function mapFirebaseError(err) {
   const code = err?.code || '';
+  const suffix = code ? ` [${code}]` : '';
   switch (code) {
     case 'auth/popup-closed-by-user':
     case 'auth/cancelled-popup-request':
-      return 'Sign-in popup was closed before completing authentication.';
+      return `Sign-in popup was closed before completing authentication.${suffix}`;
     case 'auth/popup-blocked':
-      return 'Sign-in popup was blocked by your browser. Please allow pop-ups for this site and click Continue with Google again.';
+      return `Sign-in popup was blocked by the browser.${suffix} Ensure pop-ups are allowed or that ${effectiveAuthDomain}/__/auth/handler is authorized in Google Cloud Console.`;
     case 'auth/account-exists-with-different-credential':
-      return 'An account already exists with this email under another sign-in provider. Sign in with your original provider.';
+      return `An account already exists with this email under another sign-in provider.${suffix}`;
     case 'auth/network-request-failed':
-      return 'Network error communicating with Firebase Authentication. Check your connection and retry.';
+      return `Network error communicating with Firebase Authentication.${suffix}`;
     case 'auth/operation-not-allowed':
-      return 'This sign-in provider is not enabled in the Firebase Console yet.';
+      return `This sign-in provider is not enabled in the Firebase Console yet.${suffix}`;
     case 'auth/unauthorized-domain':
-      return 'This domain is not authorized in Firebase Console -> Authentication -> Settings -> Authorized domains.';
+      return `Domain '${typeof window !== 'undefined' ? window.location.hostname : ''}' is not authorized in Firebase Console -> Authentication -> Settings -> Authorized domains.${suffix}`;
     case 'auth/invalid-credential':
     case 'auth/wrong-password':
     case 'auth/user-not-found':
-      return 'Invalid email or password.';
+      return `Invalid email or password.${suffix}`;
     case 'auth/too-many-requests':
-      return 'Too many failed attempts. Wait a moment before trying again.';
+      return `Too many failed attempts. Wait a moment before trying again.${suffix}`;
     case 'auth/user-disabled':
-      return 'This operator account has been disabled in Firebase Authentication.';
+      return `This operator account has been disabled in Firebase Authentication.${suffix}`;
     default:
-      return err?.message || 'Authentication failed. Please try again.';
+      return `${err?.message || 'Authentication failed. Please try again.'}${suffix}`;
   }
 }
 
@@ -152,7 +157,7 @@ let pendingRedirectPromise = null;
 
 export function checkRedirectResult() {
   if (!isFirebaseConfigured || !firebaseAuth) {
-    return Promise.resolve({ session: null, error: null });
+    return Promise.resolve({ session: null, error: null, fromRedirect: false });
   }
   if (!pendingRedirectPromise) {
     pendingRedirectPromise = persistenceReadyPromise
@@ -168,16 +173,21 @@ export function checkRedirectResult() {
 
         if (credential?.user) {
           clearGuestSessionFlag();
-          return { session: mapFirebaseUser(credential.user), error: null };
+          return {
+            session: mapFirebaseUser(credential.user),
+            error: null,
+            fromRedirect: true,
+          };
         }
         if (hadPendingRedirect && !firebaseAuth.currentUser) {
           return {
             session: null,
             error:
-              'Redirect sign-in could not complete because browser third-party storage was partitioned. Allow pop-ups for this site to sign in with Google.',
+              `Redirect sign-in did not yield a session. Verify that https://${effectiveAuthDomain}/__/auth/handler is listed in Google Cloud OAuth Authorized Redirect URIs and third-party storage is not blocking auth state.`,
+            fromRedirect: true,
           };
         }
-        return { session: null, error: null };
+        return { session: null, error: null, fromRedirect: false };
       })
       .catch((err) => {
         try {
@@ -188,6 +198,7 @@ export function checkRedirectResult() {
         return {
           session: null,
           error: mapFirebaseError(err),
+          fromRedirect: true,
         };
       });
   }
@@ -196,12 +207,16 @@ export function checkRedirectResult() {
 
 /**
  * Authoritative Firebase authentication lifecycle observer.
- * Waits for persistence + redirect resolution + initial onAuthStateChanged
- * before clearing authLoading so refreshes on #/dashboard do not bounce to #/signin.
+ * Awaits persistence, popup resolver warm-up, redirect result, and authStateReady
+ * before settling authLoading so refreshes and OAuth redirects route cleanly.
  */
 export function subscribeToAuthLifecycle({ onAuthState, onRedirectError }) {
   if (!isFirebaseConfigured || !firebaseAuth) {
-    onAuthState({ authLoading: false, session: readRestoredGuestSession() });
+    onAuthState({
+      authLoading: false,
+      session: readRestoredGuestSession(),
+      fromRedirect: false,
+    });
     return () => {};
   }
 
@@ -210,9 +225,12 @@ export function subscribeToAuthLifecycle({ onAuthState, onRedirectError }) {
   let unsubscribeFirebase = () => {};
 
   async function start() {
-    onAuthState({ authLoading: true, session: null });
+    onAuthState({ authLoading: true, session: null, fromRedirect: false });
 
-    const redirectOutcome = await checkRedirectResult();
+    const [redirectOutcome] = await Promise.all([
+      checkRedirectResult(),
+      resolverReadyPromise,
+    ]);
     if (disposed) return;
 
     if (redirectOutcome.error && onRedirectError) {
@@ -226,21 +244,31 @@ export function subscribeToAuthLifecycle({ onAuthState, onRedirectError }) {
 
     unsubscribeFirebase = onAuthStateChanged(firebaseAuth, (user) => {
       if (disposed) return;
+      const isInitialCallback = !initialized;
       initialized = true;
       if (user) {
         clearGuestSessionFlag();
-        onAuthState({ authLoading: false, session: mapFirebaseUser(user) });
+        onAuthState({
+          authLoading: false,
+          session: mapFirebaseUser(user),
+          fromRedirect: isInitialCallback && redirectOutcome.fromRedirect,
+        });
       } else {
-        onAuthState({ authLoading: false, session: readRestoredGuestSession() });
+        onAuthState({
+          authLoading: false,
+          session: readRestoredGuestSession(),
+          fromRedirect: false,
+        });
       }
     });
 
-    // Guarantee initial loading resolves cleanly even if listener fires async
-    if (!initialized && firebaseAuth.currentUser) {
+    if (!initialized && (redirectOutcome.session || firebaseAuth.currentUser)) {
       clearGuestSessionFlag();
       onAuthState({
         authLoading: false,
-        session: mapFirebaseUser(firebaseAuth.currentUser),
+        session:
+          redirectOutcome.session || mapFirebaseUser(firebaseAuth.currentUser),
+        fromRedirect: redirectOutcome.fromRedirect,
       });
     }
   }
@@ -280,8 +308,7 @@ export async function signInWithOAuthProvider(providerKey) {
     clearGuestSessionFlag();
     return mapFirebaseUser(credential.user);
   } catch (err) {
-    // Only auto-fallback to full-page redirect when authDomain shares the app origin;
-    // cross-origin redirect on Chrome breaks due to third-party storage partitioning.
+    console.error('[WeatherGuard Auth] OAuth sign-in error:', err?.code, err?.message);
     if (err?.code === 'auth/popup-blocked' && isSameOriginAuthDomain) {
       try {
         try {
@@ -296,6 +323,11 @@ export async function signInWithOAuthProvider(providerKey) {
         );
         return null;
       } catch (redirectErr) {
+        try {
+          sessionStorage.removeItem(PENDING_REDIRECT_FLAG);
+        } catch {
+          // ignore
+        }
         throw new Error(mapFirebaseError(redirectErr), { cause: redirectErr });
       }
     }
