@@ -22,6 +22,7 @@ import {
   YAxis,
 } from 'recharts';
 import CinematicWeatherBackground from './CinematicWeatherBackground';
+import Footer from './Footer';
 import {
   AnimatedNumber,
   MagneticButton,
@@ -529,32 +530,10 @@ export default function LandingPage({ stations, overview, onLaunchDashboard }) {
       </section>
 
       {/* Footer */}
-      <motion.footer
-        className="landing-footer"
-        initial={{ opacity: 0, y: 16 }}
-        whileInView={{ opacity: 1, y: 0 }}
-        viewport={{ once: true, amount: 0.25 }}
-        transition={{ duration: 0.45 }}
-      >
-        <div className="footer-left">
-          <div className="footer-brand">
-            <ShieldCheck size={16} />
-            <strong>WeatherGuard AI</strong>
-            <span>· Team Quest · HackKalp 2K26</span>
-          </div>
-          <p className="footer-note">
-            Prototype interface running on clearly labelled simulated AWS telemetry until live backend integration.
-          </p>
-        </div>
-
-        <MagneticButton
-          className="btn btn-secondary btn-shine"
-          onClick={onLaunchDashboard}
-        >
-          <span>Open Control Centre</span>
-          <ArrowRight size={14} />
-        </MagneticButton>
-      </motion.footer>
+      <Footer
+        onNavigateSection={scrollToSection}
+        onLaunchDashboard={onLaunchDashboard}
+      />
     </div>
   );
 }

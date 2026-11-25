@@ -231,8 +231,11 @@ export default function App() {
     };
   }, [profileOpen]);
 
-  const handleLaunchDashboard = () => {
+  const handleLaunchDashboard = (targetView) => {
     if (authLoading) return;
+    if (typeof targetView === 'string' && targetView) {
+      setActiveView(targetView);
+    }
     if (session) {
       setRoute('dashboard');
       window.location.hash = '#/dashboard';
