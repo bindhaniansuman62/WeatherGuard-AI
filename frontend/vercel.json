@@ -13,5 +13,11 @@
         }
       ]
     }
+  ],
+  "rewrites": [
+    {
+      "source": "/__/auth/(.*)",
+      "destination": "https://weatherguard-ai.firebaseapp.com/__/auth/$1"
+    }
   ]
 }

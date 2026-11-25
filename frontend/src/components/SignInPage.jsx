@@ -68,7 +68,11 @@ const OAUTH_PROVIDERS = [
   { id: 'microsoft', label: 'Continue with Microsoft', Icon: MicrosoftLogo },
 ];
 
-export default function SignInPage({ onSignedIn, onBackToLanding }) {
+export default function SignInPage({
+  onSignedIn,
+  onBackToLanding,
+  authRedirectError = '',
+}) {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -81,18 +85,16 @@ export default function SignInPage({ onSignedIn, onBackToLanding }) {
 
   useEffect(() => {
     let cancelled = false;
-    checkRedirectResult().then(({ session, error }) => {
+    checkRedirectResult().then(({ error }) => {
       if (cancelled) return;
-      if (session) {
-        onSignedIn(session);
-      } else if (error) {
+      if (error) {
         setSubmitError(error);
       }
     });
     return () => {
       cancelled = true;
     };
-  }, [onSignedIn]);
+  }, []);
 
   const validate = () => {
     const errors = {};
@@ -382,10 +384,10 @@ export default function SignInPage({ onSignedIn, onBackToLanding }) {
               )}
             </motion.div>
 
-            {submitError && (
+            {(submitError || authRedirectError) && (
               <div className="auth-submit-error" role="alert">
                 <AlertCircle size={15} />
-                <span>{submitError}</span>
+                <span>{submitError || authRedirectError}</span>
               </div>
             )}
 

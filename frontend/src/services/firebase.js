@@ -3,8 +3,13 @@ import {
   GithubAuthProvider,
   GoogleAuthProvider,
   OAuthProvider,
+  browserLocalPersistence,
   browserPopupRedirectResolver,
+  browserSessionPersistence,
   getAuth,
+  indexedDBLocalPersistence,
+  initializeAuth,
+  setPersistence,
 } from 'firebase/auth';
 
 function normalizeEnvValue(val) {
@@ -33,23 +38,44 @@ export const hasRequiredEnvVars =
   isRealValue(firebaseConfig.projectId) &&
   isRealValue(firebaseConfig.appId);
 
+export const isSameOriginAuthDomain =
+  typeof window !== 'undefined' &&
+  Boolean(firebaseConfig.authDomain) &&
+  firebaseConfig.authDomain === window.location.host;
+
 let firebaseAuth = null;
 let firebaseInitError = '';
+let persistenceReadyPromise = Promise.resolve();
 
 if (hasRequiredEnvVars) {
   try {
     const firebaseApp =
       getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
-    firebaseAuth = getAuth(firebaseApp);
 
-    // Proactively pre-load the cross-origin __/auth/iframe on desktop Chrome so
-    // signInWithPopup does not lose the synchronous click user-activation context.
+    try {
+      firebaseAuth = initializeAuth(firebaseApp, {
+        persistence: [
+          indexedDBLocalPersistence,
+          browserLocalPersistence,
+          browserSessionPersistence,
+        ],
+        popupRedirectResolver: browserPopupRedirectResolver,
+      });
+    } catch {
+      // Fallback when Auth was already initialized (e.g. Vite HMR)
+      firebaseAuth = getAuth(firebaseApp);
+      persistenceReadyPromise = setPersistence(
+        firebaseAuth,
+        browserLocalPersistence
+      ).catch(() => setPersistence(firebaseAuth, browserSessionPersistence).catch(() => {}));
+    }
+
+    // Proactively pre-load __/auth/iframe on desktop Chrome so signInWithPopup
+    // keeps Chrome's synchronous click user-activation context intact.
     if (typeof window !== 'undefined' && firebaseAuth?._popupRedirectResolver?._initialize) {
       Promise.resolve()
         .then(() => firebaseAuth._popupRedirectResolver._initialize(firebaseAuth))
-        .catch(() => {
-          // Non-fatal: signInWithPopup / signInWithRedirect will retry if needed.
-        });
+        .catch(() => {});
     }
   } catch (err) {
     firebaseInitError = err?.message || 'Failed to initialize Firebase app.';
@@ -58,7 +84,12 @@ if (hasRequiredEnvVars) {
 }
 
 export const isFirebaseConfigured = hasRequiredEnvVars && Boolean(firebaseAuth);
-export { browserPopupRedirectResolver, firebaseAuth, firebaseInitError };
+export {
+  browserPopupRedirectResolver,
+  firebaseAuth,
+  firebaseInitError,
+  persistenceReadyPromise,
+};
 
 export function getConfiguredProviders() {
   if (!isFirebaseConfigured) {

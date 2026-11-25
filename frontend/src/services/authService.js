@@ -15,8 +15,13 @@ import {
   googleProvider,
   hasRequiredEnvVars,
   isFirebaseConfigured,
+  isSameOriginAuthDomain,
   microsoftProvider,
+  persistenceReadyPromise,
 } from './firebase';
+
+const GUEST_SESSION_FLAG = 'wg_guest_session';
+const PENDING_REDIRECT_FLAG = 'wg_pending_oauth_redirect';
 
 const PROVIDER_MAP = {
   google: { provider: googleProvider, label: 'Google' },
@@ -44,7 +49,7 @@ export function mapFirebaseUser(user) {
       user.displayName || (user.email ? user.email.split('@')[0] : 'Operator'),
     photoURL: user.photoURL || null,
     providerLabel,
-    statusNote: `Signed in via ${providerLabel}. Coordinate backend ID-token verification for protected API routes.`,
+    statusNote: `Signed in via ${providerLabel}. Firebase session persisted across refreshes.`,
     signedInAt: new Date().toLocaleTimeString([], {
       hour: '2-digit',
       minute: '2-digit',
@@ -67,6 +72,33 @@ export function createDemoSession() {
       minute: '2-digit',
     }),
   };
+}
+
+export function persistGuestSessionFlag() {
+  try {
+    sessionStorage.setItem(GUEST_SESSION_FLAG, '1');
+  } catch {
+    // ignore storage errors
+  }
+}
+
+export function clearGuestSessionFlag() {
+  try {
+    sessionStorage.removeItem(GUEST_SESSION_FLAG);
+  } catch {
+    // ignore storage errors
+  }
+}
+
+export function readRestoredGuestSession() {
+  try {
+    if (sessionStorage.getItem(GUEST_SESSION_FLAG) === '1') {
+      return createDemoSession();
+    }
+  } catch {
+    // ignore storage errors
+  }
+  return null;
 }
 
 export function getAuthStatus() {
@@ -94,7 +126,7 @@ function mapFirebaseError(err) {
     case 'auth/cancelled-popup-request':
       return 'Sign-in popup was closed before completing authentication.';
     case 'auth/popup-blocked':
-      return 'Sign-in popup was blocked or lost browser context. Ensure third-party cookies/storage are enabled or try again.';
+      return 'Sign-in popup was blocked by your browser. Please allow pop-ups for this site and click Continue with Google again.';
     case 'auth/account-exists-with-different-credential':
       return 'An account already exists with this email under another sign-in provider. Sign in with your original provider.';
     case 'auth/network-request-failed':
@@ -123,37 +155,102 @@ export function checkRedirectResult() {
     return Promise.resolve({ session: null, error: null });
   }
   if (!pendingRedirectPromise) {
-    pendingRedirectPromise = getRedirectResult(
-      firebaseAuth,
-      browserPopupRedirectResolver
-    )
-      .then((credential) => ({
-        session: credential?.user ? mapFirebaseUser(credential.user) : null,
-        error: null,
-      }))
-      .catch((err) => ({
-        session: null,
-        error: mapFirebaseError(err),
-      }));
+    pendingRedirectPromise = persistenceReadyPromise
+      .then(() => getRedirectResult(firebaseAuth, browserPopupRedirectResolver))
+      .then((credential) => {
+        let hadPendingRedirect = false;
+        try {
+          hadPendingRedirect = sessionStorage.getItem(PENDING_REDIRECT_FLAG) === '1';
+          sessionStorage.removeItem(PENDING_REDIRECT_FLAG);
+        } catch {
+          // ignore
+        }
+
+        if (credential?.user) {
+          clearGuestSessionFlag();
+          return { session: mapFirebaseUser(credential.user), error: null };
+        }
+        if (hadPendingRedirect && !firebaseAuth.currentUser) {
+          return {
+            session: null,
+            error:
+              'Redirect sign-in could not complete because browser third-party storage was partitioned. Allow pop-ups for this site to sign in with Google.',
+          };
+        }
+        return { session: null, error: null };
+      })
+      .catch((err) => {
+        try {
+          sessionStorage.removeItem(PENDING_REDIRECT_FLAG);
+        } catch {
+          // ignore
+        }
+        return {
+          session: null,
+          error: mapFirebaseError(err),
+        };
+      });
   }
   return pendingRedirectPromise;
 }
 
-export function subscribeToAuthChanges(onSessionChange) {
+/**
+ * Authoritative Firebase authentication lifecycle observer.
+ * Waits for persistence + redirect resolution + initial onAuthStateChanged
+ * before clearing authLoading so refreshes on #/dashboard do not bounce to #/signin.
+ */
+export function subscribeToAuthLifecycle({ onAuthState, onRedirectError }) {
   if (!isFirebaseConfigured || !firebaseAuth) {
-    onSessionChange(null);
+    onAuthState({ authLoading: false, session: readRestoredGuestSession() });
     return () => {};
   }
 
-  checkRedirectResult().then(({ session }) => {
-    if (session) {
-      onSessionChange(session);
-    }
-  });
+  let disposed = false;
+  let initialized = false;
+  let unsubscribeFirebase = () => {};
 
-  return onAuthStateChanged(firebaseAuth, (user) => {
-    onSessionChange(mapFirebaseUser(user));
-  });
+  async function start() {
+    onAuthState({ authLoading: true, session: null });
+
+    const redirectOutcome = await checkRedirectResult();
+    if (disposed) return;
+
+    if (redirectOutcome.error && onRedirectError) {
+      onRedirectError(redirectOutcome.error);
+    }
+
+    if (typeof firebaseAuth.authStateReady === 'function') {
+      await firebaseAuth.authStateReady();
+    }
+    if (disposed) return;
+
+    unsubscribeFirebase = onAuthStateChanged(firebaseAuth, (user) => {
+      if (disposed) return;
+      initialized = true;
+      if (user) {
+        clearGuestSessionFlag();
+        onAuthState({ authLoading: false, session: mapFirebaseUser(user) });
+      } else {
+        onAuthState({ authLoading: false, session: readRestoredGuestSession() });
+      }
+    });
+
+    // Guarantee initial loading resolves cleanly even if listener fires async
+    if (!initialized && firebaseAuth.currentUser) {
+      clearGuestSessionFlag();
+      onAuthState({
+        authLoading: false,
+        session: mapFirebaseUser(firebaseAuth.currentUser),
+      });
+    }
+  }
+
+  start();
+
+  return () => {
+    disposed = true;
+    unsubscribeFirebase();
+  };
 }
 
 export async function signInWithOAuthProvider(providerKey) {
@@ -180,10 +277,18 @@ export async function signInWithOAuthProvider(providerKey) {
       entry.provider,
       browserPopupRedirectResolver
     );
+    clearGuestSessionFlag();
     return mapFirebaseUser(credential.user);
   } catch (err) {
-    if (err?.code === 'auth/popup-blocked') {
+    // Only auto-fallback to full-page redirect when authDomain shares the app origin;
+    // cross-origin redirect on Chrome breaks due to third-party storage partitioning.
+    if (err?.code === 'auth/popup-blocked' && isSameOriginAuthDomain) {
       try {
+        try {
+          sessionStorage.setItem(PENDING_REDIRECT_FLAG, '1');
+        } catch {
+          // ignore
+        }
         await signInWithRedirect(
           firebaseAuth,
           entry.provider,
@@ -217,6 +322,7 @@ export async function signInWithEmailPassword({ email, password }) {
       email.trim(),
       password
     );
+    clearGuestSessionFlag();
     return mapFirebaseUser(credential.user);
   } catch (err) {
     throw new Error(mapFirebaseError(err), { cause: err });
@@ -231,6 +337,7 @@ export async function getCurrentIdToken() {
 }
 
 export async function signOutAccount(session) {
+  clearGuestSessionFlag();
   if (isFirebaseConfigured && firebaseAuth && session?.mode === 'firebase') {
     await signOut(firebaseAuth);
   }

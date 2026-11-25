@@ -27,7 +27,12 @@ import {
   resetStationFault,
   setDemoModeOverride,
 } from './services/api';
-import { createDemoSession, signOutAccount, subscribeToAuthChanges } from './services/authService';
+import {
+  clearGuestSessionFlag,
+  persistGuestSessionFlag,
+  signOutAccount,
+  subscribeToAuthLifecycle,
+} from './services/authService';
 import './App.css';
 
 const VIEW_TITLES = {
@@ -74,9 +79,9 @@ const VIEW_TITLES = {
 };
 
 function resolveRouteFromHash() {
-  const hash = window.location.hash;
-  if (hash === '#/dashboard') return 'dashboard';
-  if (hash === '#/signin') return 'signin';
+  const hash = window.location.hash || '';
+  if (hash.startsWith('#/dashboard')) return 'dashboard';
+  if (hash.startsWith('#/signin')) return 'signin';
   return 'landing';
 }
 
@@ -84,9 +89,9 @@ export default function App() {
   const shellRef = useRef(null);
   const profileRef = useRef(null);
   const [route, setRoute] = useState(resolveRouteFromHash);
-  const [session, setSession] = useState(() =>
-    window.location.hash === '#/dashboard' ? createDemoSession() : null
-  );
+  const [authLoading, setAuthLoading] = useState(true);
+  const [session, setSession] = useState(null);
+  const [authRedirectError, setAuthRedirectError] = useState('');
   const [activeView, setActiveView] = useState('overview');
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -157,28 +162,46 @@ export default function App() {
   }, [isLive, hasBundle]);
 
   useEffect(() => {
-    const unsubscribe = subscribeToAuthChanges((firebaseSession) => {
-      if (firebaseSession) {
-        setAvatarFailed(false);
-        setSession(firebaseSession);
-        if (window.location.hash === '#/signin') {
-          setRoute('dashboard');
-          window.location.hash = '#/dashboard';
+    const unsubscribe = subscribeToAuthLifecycle({
+      onAuthState: ({ authLoading: loading, session: nextSession }) => {
+        setAuthLoading(loading);
+        if (!loading) {
+          setAvatarFailed(false);
+          setSession(nextSession);
         }
-      } else {
-        setSession((prev) => (prev?.mode === 'firebase' ? null : prev));
-      }
+      },
+      onRedirectError: (errMsg) => {
+        setAuthRedirectError(errMsg || '');
+      },
     });
     return () => unsubscribe();
   }, []);
 
+  const effectiveRoute = authLoading
+    ? route
+    : session && route === 'signin'
+      ? 'dashboard'
+      : !session && route === 'dashboard'
+        ? 'signin'
+        : route;
+
+  useEffect(() => {
+    if (authLoading) return;
+    if (session && route === 'signin') {
+      if (window.location.hash !== '#/dashboard') {
+        window.location.hash = '#/dashboard';
+      }
+      window.scrollTo({ top: 0, behavior: 'auto' });
+    } else if (!session && route === 'dashboard') {
+      if (window.location.hash !== '#/signin') {
+        window.location.hash = '#/signin';
+      }
+    }
+  }, [authLoading, session, route]);
+
   useEffect(() => {
     const handleHashChange = () => {
-      const nextRoute = resolveRouteFromHash();
-      setRoute(nextRoute);
-      if (nextRoute === 'dashboard') {
-        setSession((prev) => prev || createDemoSession());
-      }
+      setRoute(resolveRouteFromHash());
     };
     window.addEventListener('hashchange', handleHashChange);
     return () => window.removeEventListener('hashchange', handleHashChange);
@@ -203,6 +226,7 @@ export default function App() {
   }, [profileOpen]);
 
   const handleLaunchDashboard = () => {
+    if (authLoading) return;
     if (session) {
       setRoute('dashboard');
       window.location.hash = '#/dashboard';
@@ -214,7 +238,16 @@ export default function App() {
   };
 
   const handleSignedIn = (nextSession) => {
+    if (!nextSession) return;
+    setAuthRedirectError('');
+    if (nextSession.mode === 'demo') {
+      persistGuestSessionFlag();
+    } else {
+      clearGuestSessionFlag();
+    }
+    setAvatarFailed(false);
     setSession(nextSession);
+    setAuthLoading(false);
     setRoute('dashboard');
     window.location.hash = '#/dashboard';
     window.scrollTo({ top: 0, behavior: 'auto' });
@@ -348,6 +381,57 @@ export default function App() {
     }
   };
 
+  if (authLoading && (effectiveRoute === 'dashboard' || effectiveRoute === 'signin')) {
+    return (
+      <div className="app-shell">
+        <div className="skeleton-shell" aria-label="Restoring authentication session">
+          <div className="skeleton-bar" />
+          <div className="skeleton-grid">
+            <div className="skeleton-card" />
+            <div className="skeleton-card" />
+            <div className="skeleton-card" />
+            <div className="skeleton-card" />
+            <div className="skeleton-card" />
+          </div>
+          <div className="skeleton-panel" />
+        </div>
+      </div>
+    );
+  }
+
+  if (effectiveRoute === 'signin') {
+    return (
+      <MotionConfig reducedMotion="user">
+        <AnimatePresence mode="wait">
+          <motion.div
+            key="signin-view"
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -8 }}
+            transition={{ duration: 0.26, ease: [0.22, 1, 0.36, 1] }}
+          >
+            <SignInPage
+              onSignedIn={handleSignedIn}
+              onBackToLanding={handleBackToLanding}
+              authRedirectError={authRedirectError}
+            />
+          </motion.div>
+        </AnimatePresence>
+      </MotionConfig>
+    );
+  }
+
+  if (effectiveRoute === 'dashboard' && !session) {
+    return (
+      <div className="app-shell">
+        <div className="skeleton-shell" aria-label="Redirecting to sign in">
+          <div className="skeleton-bar" />
+          <div className="skeleton-panel" />
+        </div>
+      </div>
+    );
+  }
+
   if (!bundle && loadError) {
     return (
       <div className="app-shell">
@@ -411,12 +495,12 @@ export default function App() {
   const unreadAlerts = alerts.filter((a) => !a.acknowledged);
   const viewMeta = VIEW_TITLES[activeView] || VIEW_TITLES.overview;
 
-  const activeSession = session || createDemoSession();
+  const activeSession = session;
 
   return (
     <MotionConfig reducedMotion="user">
       <AnimatePresence mode="wait">
-        {route === 'landing' ? (
+        {effectiveRoute === 'landing' ? (
           <motion.div
             key="landing-view"
             initial={{ opacity: 0 }}
@@ -428,19 +512,6 @@ export default function App() {
               stations={stations}
               overview={overview}
               onLaunchDashboard={handleLaunchDashboard}
-            />
-          </motion.div>
-        ) : route === 'signin' ? (
-          <motion.div
-            key="signin-view"
-            initial={{ opacity: 0, y: 8 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -8 }}
-            transition={{ duration: 0.26, ease: [0.22, 1, 0.36, 1] }}
-          >
-            <SignInPage
-              onSignedIn={handleSignedIn}
-              onBackToLanding={handleBackToLanding}
             />
           </motion.div>
         ) : (
