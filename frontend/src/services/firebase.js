@@ -3,6 +3,7 @@ import {
   GithubAuthProvider,
   GoogleAuthProvider,
   OAuthProvider,
+  browserPopupRedirectResolver,
   getAuth,
 } from 'firebase/auth';
 
@@ -40,6 +41,16 @@ if (hasRequiredEnvVars) {
     const firebaseApp =
       getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
     firebaseAuth = getAuth(firebaseApp);
+
+    // Proactively pre-load the cross-origin __/auth/iframe on desktop Chrome so
+    // signInWithPopup does not lose the synchronous click user-activation context.
+    if (typeof window !== 'undefined' && firebaseAuth?._popupRedirectResolver?._initialize) {
+      Promise.resolve()
+        .then(() => firebaseAuth._popupRedirectResolver._initialize(firebaseAuth))
+        .catch(() => {
+          // Non-fatal: signInWithPopup / signInWithRedirect will retry if needed.
+        });
+    }
   } catch (err) {
     firebaseInitError = err?.message || 'Failed to initialize Firebase app.';
     console.error('[WeatherGuard Auth] Firebase initialization error:', err);
@@ -47,7 +58,7 @@ if (hasRequiredEnvVars) {
 }
 
 export const isFirebaseConfigured = hasRequiredEnvVars && Boolean(firebaseAuth);
-export { firebaseAuth, firebaseInitError };
+export { browserPopupRedirectResolver, firebaseAuth, firebaseInitError };
 
 export function getConfiguredProviders() {
   if (!isFirebaseConfigured) {

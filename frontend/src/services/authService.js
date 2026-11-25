@@ -1,10 +1,13 @@
 import {
+  getRedirectResult,
   onAuthStateChanged,
   signInWithEmailAndPassword,
   signInWithPopup,
+  signInWithRedirect,
   signOut,
 } from 'firebase/auth';
 import {
+  browserPopupRedirectResolver,
   firebaseAuth,
   firebaseInitError,
   getConfiguredProviders,
@@ -91,7 +94,7 @@ function mapFirebaseError(err) {
     case 'auth/cancelled-popup-request':
       return 'Sign-in popup was closed before completing authentication.';
     case 'auth/popup-blocked':
-      return 'Popup was blocked by your browser. Allow popups for this site and try again.';
+      return 'Sign-in popup was blocked or lost browser context. Ensure third-party cookies/storage are enabled or try again.';
     case 'auth/account-exists-with-different-credential':
       return 'An account already exists with this email under another sign-in provider. Sign in with your original provider.';
     case 'auth/network-request-failed':
@@ -113,11 +116,40 @@ function mapFirebaseError(err) {
   }
 }
 
+let pendingRedirectPromise = null;
+
+export function checkRedirectResult() {
+  if (!isFirebaseConfigured || !firebaseAuth) {
+    return Promise.resolve({ session: null, error: null });
+  }
+  if (!pendingRedirectPromise) {
+    pendingRedirectPromise = getRedirectResult(
+      firebaseAuth,
+      browserPopupRedirectResolver
+    )
+      .then((credential) => ({
+        session: credential?.user ? mapFirebaseUser(credential.user) : null,
+        error: null,
+      }))
+      .catch((err) => ({
+        session: null,
+        error: mapFirebaseError(err),
+      }));
+  }
+  return pendingRedirectPromise;
+}
+
 export function subscribeToAuthChanges(onSessionChange) {
   if (!isFirebaseConfigured || !firebaseAuth) {
     onSessionChange(null);
     return () => {};
   }
+
+  checkRedirectResult().then(({ session }) => {
+    if (session) {
+      onSessionChange(session);
+    }
+  });
 
   return onAuthStateChanged(firebaseAuth, (user) => {
     onSessionChange(mapFirebaseUser(user));
@@ -143,9 +175,25 @@ export async function signInWithOAuthProvider(providerKey) {
   }
 
   try {
-    const credential = await signInWithPopup(firebaseAuth, entry.provider);
+    const credential = await signInWithPopup(
+      firebaseAuth,
+      entry.provider,
+      browserPopupRedirectResolver
+    );
     return mapFirebaseUser(credential.user);
   } catch (err) {
+    if (err?.code === 'auth/popup-blocked') {
+      try {
+        await signInWithRedirect(
+          firebaseAuth,
+          entry.provider,
+          browserPopupRedirectResolver
+        );
+        return null;
+      } catch (redirectErr) {
+        throw new Error(mapFirebaseError(redirectErr), { cause: redirectErr });
+      }
+    }
     throw new Error(mapFirebaseError(err), { cause: err });
   }
 }

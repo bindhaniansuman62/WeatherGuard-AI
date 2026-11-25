@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
 import {
   AlertCircle,
@@ -13,6 +13,7 @@ import {
   ShieldCheck,
 } from 'lucide-react';
 import {
+  checkRedirectResult,
   createDemoSession,
   getAuthStatus,
   signInWithEmailPassword,
@@ -78,6 +79,21 @@ export default function SignInPage({ onSignedIn, onBackToLanding }) {
   const authStatus = getAuthStatus();
   const isBusy = activeAuth !== null;
 
+  useEffect(() => {
+    let cancelled = false;
+    checkRedirectResult().then(({ session, error }) => {
+      if (cancelled) return;
+      if (session) {
+        onSignedIn(session);
+      } else if (error) {
+        setSubmitError(error);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [onSignedIn]);
+
   const validate = () => {
     const errors = {};
     const trimmedEmail = email.trim();
@@ -97,21 +113,29 @@ export default function SignInPage({ onSignedIn, onBackToLanding }) {
     return Object.keys(errors).length === 0;
   };
 
-  const handleOAuthClick = async (providerId) => {
+  const handleOAuthClick = (providerId) => {
     if (isBusy) return;
+    // Call signInWithOAuthProvider synchronously in the click event stack before
+    // scheduling any React state updates so browser transient user activation stays intact.
+    const authPromise = signInWithOAuthProvider(providerId);
     setSubmitError('');
     setFieldErrors({});
     setActiveAuth(providerId);
 
-    try {
-      const session = await signInWithOAuthProvider(providerId);
-      setPassword('');
-      onSignedIn(session);
-    } catch (err) {
-      setSubmitError(err.message || 'Provider authentication failed.');
-    } finally {
-      setActiveAuth(null);
-    }
+    authPromise
+      .then((session) => {
+        if (session) {
+          setPassword('');
+          onSignedIn(session);
+        }
+      })
+      .catch((err) => {
+        setSubmitError(err.message || 'Provider authentication failed.');
+        setActiveAuth(null);
+      })
+      .finally(() => {
+        setActiveAuth((prev) => (prev === providerId ? null : prev));
+      });
   };
 
   const handleEmailSubmit = async (e) => {
