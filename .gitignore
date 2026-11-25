@@ -1,0 +1,49 @@
+# Dependencies & virtual environments
+node_modules/
+.venv/
+venv/
+env/
+
+# Build & bundle outputs
+dist/
+dist-ssr/
+build/
+
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Environment variables (preserve templates)
+.env
+.env.*
+!.env.example
+!frontend/.env.example
+*.local
+
+# Local SQLite databases
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Private credentials & service account keys
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*service-account*.json
+*firebase-adminsdk*.json
+credentials.json
+
+# Logs & OS/editor artifacts
+logs/
+*.log
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
